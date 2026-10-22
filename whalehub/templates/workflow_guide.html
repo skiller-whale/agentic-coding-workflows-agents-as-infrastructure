@@ -1,0 +1,71 @@
+    {% if not inline_guide %}<h2>Workflow guide</h2>{% endif %}
+    <p>Each <code>.whalehub/*.md</code> file defines one agent: YAML settings followed by Markdown instructions.</p>
+    <div class="help-columns">
+      <div class="guide-section">
+        <h3>Example</h3>
+        <pre><code>---
+name: Review issue
+model: eu.anthropic.claude-haiku-5-5
+trigger: manual
+tools: [ReadIssue]
+max_turns: 8
+timeout_seconds: 120
+---
+Read issue #{{ '{{ whalehub.event.issue.number }}' }} with ReadIssue.
+Summarize one useful next step.
+If no issue number was supplied, explain that an issue must be selected.</code></pre>
+      </div>
+      <div class="guide-section">
+        <h3>Settings</h3>
+        <table>
+          <tbody>
+            <tr><th scope="row"><code>name</code></th><td>Display name.</td></tr>
+            <tr><th scope="row"><code>model</code></th><td>Claude Bedrock model ID.</td></tr>
+            <tr><th scope="row"><code>trigger</code></th><td><ul>
+              <li><code>manual</code>: start in Runs.</li>
+              <li><code>issue_created</code>: run when an issue is created.</li>
+            </ul></td></tr>
+            <tr><th scope="row"><code>tools</code></th><td>Available tools; <code>[]</code> enables none.</td></tr>
+            <tr><th scope="row"><code>max_turns</code></th><td>Optional positive integer. Overrides the runner's turn limit (12 unless reconfigured).</td></tr>
+            <tr><th scope="row"><code>timeout_seconds</code></th><td>Optional positive integer. Overrides the execution timeout in seconds (180 unless reconfigured). Includes tool execution.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="guide-section">
+    <h3>Issue fields</h3>
+    <p>Fields under <code>whalehub.event.issue</code>:</p>
+    <ul>
+      <li><code>number</code>: selected issue number.</li>
+      <li><code>title</code>: issue title.</li>
+      <li><code>body</code>: issue description.</li>
+      <li><code>labels</code>: list of labels.</li>
+      <li><code>comments</code>: list of comments.</li>
+    </ul>
+    </div>
+    <div class="guide-section">
+    <h3>Available tools</h3>
+    <p>Use these groups in <code>tools</code>, for example <code>tools: [Read, Edit, Bash]</code>. Whalehub expands each group into the listed <a href="https://code.claude.com/docs/en/tools-reference">Claude Code tools</a> before starting the agent.</p>
+    <table>
+      <thead><tr><th>Workflow group</th><th>Claude Code tools and purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>Read</code></td><td><code>Read</code>, <code>Glob</code>, <code>Grep</code><br>Read files, find filenames and search file contents.</td></tr>
+        <tr><td><code>Edit</code></td><td><code>Edit</code>, <code>Write</code>, <code>NotebookEdit</code><br>Edit existing files, create files and edit notebooks.</td></tr>
+        <tr><td><code>Bash</code></td><td><code>Bash</code><br>Run shell commands, tests and Git.</td></tr>
+        <tr><td><code>Subagents</code></td><td><code>Agent</code><br>Delegate work to Claude Code's built-in subagents.</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="guide-section">
+    <h3>Whalehub issue tools</h3>
+    <table>
+      <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>ReadIssue</code></td><td>Read one issue's current title, body, labels and comments: <code>{"issue_number": 1}</code>.</td></tr>
+        <tr><td><code>ReadIssues</code></td><td>Read all current issues, including labels and comments. No arguments.</td></tr>
+        <tr><td><code>CreateIssue</code></td><td>Create an issue: <code>{"title": "Your title", "body": "Your description"}</code>. Returns its number and content.</td></tr>
+        <tr><td><code>SetIssueLabels</code></td><td>Replace labels: <code>{"issue_number": 1, "labels": ["maintenance"]}</code>. <code>[]</code> clears them.</td></tr>
+        <tr><td><code>AddIssueComment</code></td><td>Post a comment: <code>{"issue_number": 1, "body": "Your report"}</code>.</td></tr>
+      </tbody>
+    </table>
+    </div>

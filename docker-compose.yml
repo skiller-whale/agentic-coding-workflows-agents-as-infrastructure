@@ -1,0 +1,103 @@
+services:
+  whalehub:
+    build:
+      context: .
+      target: whalehub
+    ports:
+      - "${WHALEHUB_PORT:-8000}:8000"
+    environment:
+      WHALEHUB_EXECUTION_ENABLED: "1"
+    volumes:
+      - type: bind
+        source: ./ticket_parser
+        target: /workspace/ticket_parser
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.whalehub/worktrees
+        target: /workspace/worktrees
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.whalehub/runs
+        target: /workspace/runs
+        bind:
+          create_host_path: false
+      # Issue content and comments live in whalehub/data, accessible only to Flask.
+      - type: bind
+        source: ./whalehub/data
+        target: /app/data
+        bind:
+          create_host_path: false
+      # The lock and legacy-state migration archive are private to Flask too.
+      - type: bind
+        source: ./.whalehub/state
+        target: /var/lib/whalehub
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://localhost:8000/health', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  whalehub_runner:
+    build:
+      context: .
+      target: runner
+    environment:
+      WHALEHUB_API_URL: "http://whalehub:8000"
+      WHALEHUB_TIMEOUT_SECONDS: "${WHALEHUB_TIMEOUT_SECONDS:-180}"
+      WHALEHUB_MAX_TURNS: "${WHALEHUB_MAX_TURNS:-12}"
+      CLAUDE_CODE_USE_BEDROCK: "1"
+      ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock-runtime.aws-proxy.skillerwhale.com"
+      AWS_REGION: "eu-west-1"
+      AWS_SECRET_ACCESS_KEY: "unused"
+    volumes:
+      # Git worktrees refer to these absolute paths in both containers.
+      - type: bind
+        source: ./ticket_parser
+        target: /workspace/ticket_parser
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.whalehub/worktrees
+        target: /workspace/worktrees
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.whalehub/runs
+        target: /workspace/runs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./attendance_id
+        target: /app/sync/attendance_id
+        read_only: true
+        bind:
+          create_host_path: false
+  sync:
+    image: "ghcr.io/skiller-whale/learnersync:0.2.8"
+    network_mode: "host"
+    environment:
+      SERVER_URL: https://train.skillerwhale.com
+      SW_RUNNING_IN_HOSTED_ENV:
+      WATCHER_BASE_PATH: "/app"
+      ATTENDANCE_ID_FILE: "/app/sync/attendance_id"
+      WATCHED_EXTS: ".py .yaml .yml .json .js .css .html .md .chat"
+      IGNORE_MATCH: ".git node_modules"
+    volumes:
+      - .:/app/code
+      - ./.chat_history:/app/chat_history
+      - ./attendance_id:/app/sync/attendance_id
+    tty: true
+    stdin_open: true
+  claude_session_sync_filter:
+    image: "ghcr.io/skiller-whale/claude-session-sync-filter:0.0.2"
+    volumes:
+      - /home/learner/.claude/projects:/sessions_raw:ro
+      - ./.chat_history:/sessions_filtered

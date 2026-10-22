@@ -1,0 +1,9 @@
+**/.git
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.venv
+**/.DS_Store
+/.whalehub
+/attendance_id
+**/node_modules

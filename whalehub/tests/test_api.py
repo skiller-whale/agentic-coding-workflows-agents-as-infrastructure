@@ -1074,7 +1074,7 @@ def test_existing_jsonl_activity_is_converted_once(exercise):
     ]
     original = ''.join(json.dumps(entry) + '\n' for entry in entries)
     legacy.write_text(original)
-    # setup.sh may already have created the log that sync bind-mounts.
+    # The starter log already exists when Compose bind-mounts it.
     log = config['STATE_PATH'] / 'activity.log'
     log.touch()
     inode = log.stat().st_ino

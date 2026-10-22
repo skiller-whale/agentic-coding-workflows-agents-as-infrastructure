@@ -89,6 +89,8 @@ services:
       WATCHER_BASE_PATH: "/app"
       ATTENDANCE_ID_FILE: "/app/sync/attendance_id"
       WATCHED_EXTS: ".md .json .log .patch .chat"
+      # Polling applies ignore rules to every change and detects bind-mounted log writes.
+      FORCE_POLL: "1"
       # Keep run snapshots, statuses, results and patches; omit worker internals.
       IGNORE_MATCH: "job.json claimed.json mcp.json claude.jsonl run.log /app/code/.whalehub/runs/.pending-*"
     volumes:

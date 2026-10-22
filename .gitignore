@@ -1,4 +1,7 @@
-/.whalehub/
+/.whalehub/*
+!/.whalehub/state/
+/.whalehub/state/*
+!/.whalehub/state/activity.log
 /attendance_id
 /ticket_parser/.git
 __pycache__/

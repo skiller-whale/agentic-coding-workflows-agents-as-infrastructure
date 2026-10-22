@@ -198,13 +198,18 @@ invoking Claude. `/health` describes configuration, not worker liveness.
 ## Learner sync
 
 Run `./setup.sh` before starting or recreating Compose services. It creates the
-activity log and test-issue directory without clearing existing progress.
+runtime directories without clearing existing progress.
 
 Sync has read-only mounts for saved `ticket_parser/.whalehub/*.md` workflows,
 `whalehub/data/issues.json`, run snapshots/statuses/results/patches, test issues
 and app activity. Worktrees and app source are not mounted. Queue files
 (`job.json`, `claimed.json`), MCP configuration and raw Claude output are excluded.
 Host Claude session sync remains a separate mount.
+
+`FORCE_POLL=1` keeps sync on its polling path. In learnersync 0.2.8, live file
+events bypass the file ignore rules and disable fallback polling; writes through
+the activity log's file bind mount can then go unnoticed. Polling applies the
+ignore rules on every scan and detects those log updates without a restart.
 
 The app appends plain text to `.whalehub/state/activity.log`, exposed to sync as
 `code/.whalehub/activity.log`. Each entry is one line, starting with `[HH:MM:SS]`
@@ -216,3 +221,6 @@ when scoped to a test. Polling and editor keystrokes are not recorded. Run
 `status.json` files supply the current execution state; the activity log records
 submission, not every worker status transition.
 Startup converts existing JSONL activity once and archives the original file.
+The empty log is included in Git and is present before Compose starts. Learnersync
+uploads it after its first write; empty files are not uploaded. Changing filters does not remove
+files previously uploaded to the session history.

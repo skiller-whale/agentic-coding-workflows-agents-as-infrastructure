@@ -124,6 +124,46 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def activity_line(entry):
+    action = entry["action"]
+    path = entry.get("workflow_path", "")
+    issue = f"#{entry.get('issue_id')}"
+    commit = entry.get("commit", "")[:8]
+    if action == "app_opened":
+        message = "Opened Whalehub"
+    elif action == "ui_clicked":
+        context = ", ".join(value for value in (entry.get("tab", "").lstrip("#"), entry.get("target")) if value)
+        message = "Clicked " + (entry.get("label") or entry["control"])
+        if context:
+            message += f" ({context})"
+    elif action == "workflow_saved":
+        message = f"Saved workflow {path} (commit {commit})" if entry["committed"] else f"Saved workflow {path} (unchanged)"
+    elif action == "workflow_created":
+        message = f"Created workflow {path} (commit {commit})"
+    elif action in {"workflow_test_queued", "workflow_run_queued"}:
+        kind = "test" if action == "workflow_test_queued" else "run"
+        message = f"Queued {kind} {path}"
+        if entry.get("issue_id") is not None:
+            message += f" for {issue}"
+        if entry.get("trigger") == "issue_created":
+            message += " automatically"
+        message += f" (run {entry['run_id']})"
+    elif action in {"issue_created", "issue_updated"}:
+        message = f"{'Created' if action == 'issue_created' else 'Updated'} issue {issue}: {entry['title']}"
+    elif action == "issue_comment_added":
+        message = f"Commented on {issue} (comment #{entry['comment_id']})"
+    elif action == "issue_labels_updated":
+        message = f"Set labels on {issue}: {', '.join(entry['labels'])}" if entry["labels"] else f"Cleared labels on {issue}"
+    elif action == "request_failed":
+        message = f"Failed {entry['method']} {entry['path']} ({entry['status']}): {entry['error']}"
+    else:
+        message = action.replace("_", " ").capitalize()
+    if entry.get("actor") == "agent":
+        message = f"Agent: {message} ({'test, ' if entry.get('test') else ''}run {entry['run_id']})"
+    timestamp = datetime.fromisoformat(entry["timestamp"]).astimezone(timezone.utc).strftime("%H:%M:%S")
+    return f"[{timestamp}] {' '.join(message.split())}\n"
+
+
 def create_app(config=None):
     app = Flask(__name__, root_path=str(Path(__file__).resolve().parent))
     app.config.from_mapping(
@@ -143,6 +183,21 @@ def create_app(config=None):
     issues_path.parent.mkdir(parents=True, exist_ok=True)
     test_issues = state / "test-issues"
     test_issues.mkdir(exist_ok=True)
+
+    def append_activity(content):
+        # Appending preserves the inode used by sync's read-only file mount.
+        # A separate file lock also works while the caller holds app.lock.
+        with (state / "activity.log").open("a", encoding="utf-8") as log:
+            fcntl.flock(log, fcntl.LOCK_EX)
+            log.write(content)
+
+    def activity(action, *, actor="learner", **details):
+        entry = {"timestamp": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                 "actor": actor, "action": action, **details}
+        try:
+            append_activity(activity_line(entry))
+        except OSError:
+            app.logger.exception("Could not record activity")
 
     @contextmanager
     def locked():
@@ -173,6 +228,9 @@ def create_app(config=None):
 
     @app.errorhandler(APIError)
     def api_error(error):
+        if request.method in {"POST", "PUT"} and request.path != "/api/activity":
+            activity("request_failed", actor="app", method=request.method,
+                     path=request.path, status=error.status, error=error.message)
         return jsonify(error=error.message), error.status
 
     @app.errorhandler(413)
@@ -299,7 +357,7 @@ def create_app(config=None):
         if any(read_json(path / "status.json")["status"] == "running" for path in directories()):
             raise APIError("Another run is active, including jobs waiting for the worker. Wait for it to finish.", 409)
 
-    def publish_run(path, source, definition, issue, base, *, test=False):
+    def publish_run(path, source, definition, issue, base, *, test=False, trigger="manual"):
         identifier = uuid4().hex
         job = {"run_id": identifier, "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                "base_commit": base, "workflow": {"path": path.relative_to(repo).as_posix(), "source": source, **definition},
@@ -311,6 +369,8 @@ def create_app(config=None):
             if test:
                 write_json(test_issues / (identifier + ".json"), [issue])
             write_json(pending / "status.json", {"status": "running", "message": "Waiting for the worker."})
+            # This immutable snapshot survives the worker's job -> claimed rename.
+            write_json(pending / "run.json", job)
             write_json(pending / "job.json", job)
             pending.rename(runs / identifier)
         finally:
@@ -318,6 +378,11 @@ def create_app(config=None):
                 shutil.rmtree(pending)
                 if test:
                     (test_issues / (identifier + ".json")).unlink(missing_ok=True)
+        activity("workflow_test_queued" if test else "workflow_run_queued",
+                 actor="app" if trigger == "issue_created" else "learner",
+                 run_id=identifier, workflow_path=job["workflow"]["path"],
+                 workflow_name=definition["name"], issue_id=issue["id"] if issue else None,
+                 trigger="test" if test else trigger)
         return {"run_id": identifier, "status": "running"}
 
     def issue_workflows():
@@ -333,7 +398,7 @@ def create_app(config=None):
                 matched.append((path, source, definition))
         return matched
 
-    def make_issue(fields, *, trigger_workflows):
+    def make_issue(fields, *, trigger_workflows, actor="learner", run_id=None):
         workflows = issue_workflows() if trigger_workflows else []
         base = main_commit() if workflows else None
         issues = read_json(issues_path)
@@ -341,9 +406,10 @@ def create_app(config=None):
                  **fields, "labels": [], "comments": []}
         issues.append(issue)
         write_json(issues_path, issues)
+        activity("issue_created", actor=actor, issue_id=issue["id"], title=issue["title"], run_id=run_id, test=False)
         triggered = []
         for path, source, definition in workflows:
-            run = publish_run(path, source, definition, issue, base)
+            run = publish_run(path, source, definition, issue, base, trigger="issue_created")
             triggered.append({"run_id": run["run_id"], "name": definition["name"]})
         return issue, triggered
 
@@ -393,7 +459,17 @@ def create_app(config=None):
 
     @app.get("/")
     def index():
+        activity("app_opened")
         return render_template("index.html", execution_enabled=app.config["EXECUTION_ENABLED"])
+
+    @app.post("/api/activity")
+    def record_click():
+        data = payload()
+        if (set(data) - {"control", "label", "tab", "target"} or not data.get("control")
+                or any(not isinstance(value, str) or len(value) > 256 for value in data.values())):
+            raise APIError("Send a control and optional label, tab and target strings of at most 256 characters.")
+        activity("ui_clicked", **data)
+        return "", 204
 
     @app.get("/health")
     def health():
@@ -450,8 +526,11 @@ def create_app(config=None):
                 git("add", "--", relative)
                 # --only commits this working file and retains unrelated staged entries.
                 git("commit", "--only", "-m", "Update workflow " + path.name, "--", relative)
+            commit = git("rev-parse", "HEAD")
+            activity("workflow_saved", workflow_path=relative, workflow_name=definition["name"],
+                     commit=commit, committed=changed)
             return {"path": relative, "name": definition["name"], "committed": changed,
-                    "commit": git("rev-parse", "HEAD"), "sha256": hashlib.sha256(data["source"].encode()).hexdigest()}
+                    "commit": commit, "sha256": hashlib.sha256(data["source"].encode()).hexdigest()}
 
     @app.post("/api/workflows")
     def create_workflow():
@@ -473,7 +552,9 @@ def create_app(config=None):
             relative = path.relative_to(repo).as_posix()
             git("add", "--", relative)
             git("commit", "--only", "-m", "Create workflow " + path.name, "--", relative)
-            return {"path": relative, "commit": git("rev-parse", "HEAD")}, 201
+            commit = git("rev-parse", "HEAD")
+            activity("workflow_created", workflow_path=relative, commit=commit)
+            return {"path": relative, "commit": commit}, 201
 
     @app.get("/api/issues")
     def issues():
@@ -511,8 +592,10 @@ def create_app(config=None):
                 issue = {"id": max(i["id"] for i in issues) + 1, **fields, "labels": [], "comments": []}
                 issues.append(issue)
                 write_json(store, issues)
+                activity("issue_created", actor="agent", issue_id=issue["id"], title=issue["title"],
+                         run_id=identifier, test=True)
             else:
-                issue, _ = make_issue(fields, trigger_workflows=False)
+                issue, _ = make_issue(fields, trigger_workflows=False, actor="agent", run_id=identifier)
             return agent_issue(issue), 201
 
     @app.put("/api/issues/<int:identifier>")
@@ -523,6 +606,7 @@ def create_app(config=None):
             issue = issue_for(issues, identifier)
             issue.update(fields)
             write_json(issues_path, issues)
+            activity("issue_updated", issue_id=identifier, title=issue["title"])
             return issue
 
     @app.post("/api/issues/<int:identifier>/comments")
@@ -533,6 +617,7 @@ def create_app(config=None):
             issue = issue_for(issues, identifier)
             comment = append_comment(issue, fields["body"], "User")
             write_json(issues_path, issues)
+            activity("issue_comment_added", issue_id=identifier, comment_id=comment["id"])
             return comment, 201
 
     @app.post("/api/runs/<identifier>/comments")
@@ -547,6 +632,8 @@ def create_app(config=None):
             issue = issue_for(issues, number)
             comment = append_comment(issue, fields["body"], job["workflow"]["name"], identifier)
             write_json(store, issues)
+            activity("issue_comment_added", actor="agent", issue_id=number, comment_id=comment["id"],
+                     run_id=identifier, test=bool(job.get("test")))
             return {"issue_number": issue["id"], "comment": comment}, 201
 
     @app.post("/api/runs/<identifier>/labels")
@@ -563,6 +650,8 @@ def create_app(config=None):
             issue = issue_for(issues, number)
             issue["labels"] = data["labels"]
             write_json(store, issues)
+            activity("issue_labels_updated", actor="agent", issue_id=number, labels=issue["labels"],
+                     run_id=identifier, test=bool(job.get("test")))
             return {"issue_number": issue["id"], "labels": issue["labels"]}
 
     @app.get("/api/runs")
@@ -632,6 +721,24 @@ def create_app(config=None):
             issue = issue_for(read_json(issues_path), selected) if selected is not None else None
             require_idle()
             return publish_run(path, source, definition, issue, base), 202
+
+    # Preserve the sync snapshot for runs created before run.json was introduced.
+    with locked():
+        for path in directories():
+            if not (path / "run.json").exists():
+                try:
+                    write_json(path / "run.json", job_for(path))
+                except (OSError, ValueError):
+                    app.logger.exception("Could not snapshot existing run %s", path.name)
+        legacy_activity = state / "activity.jsonl"
+        if legacy_activity.is_file():
+            try:
+                content = "".join(activity_line(json.loads(line)) for line in legacy_activity.read_text(encoding="utf-8").splitlines()
+                                  if line.strip())
+                append_activity(content)
+                legacy_activity.rename(state / "activity.migrated.jsonl")
+            except (OSError, ValueError, KeyError):
+                app.logger.exception("Could not convert existing activity log")
 
     return app
 

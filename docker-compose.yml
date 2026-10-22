@@ -23,7 +23,7 @@ services:
         target: /workspace/runs
         bind:
           create_host_path: false
-      # Issue content and comments live in whalehub/data, accessible only to Flask.
+      # Only Flask mutates issue content and comments.
       - type: bind
         source: ./whalehub/data
         target: /app/data
@@ -88,12 +88,23 @@ services:
       SW_RUNNING_IN_HOSTED_ENV:
       WATCHER_BASE_PATH: "/app"
       ATTENDANCE_ID_FILE: "/app/sync/attendance_id"
-      WATCHED_EXTS: ".py .yaml .yml .json .js .css .html .md .chat"
-      IGNORE_MATCH: ".git node_modules"
+      WATCHED_EXTS: ".md .json .log .patch .chat"
+      # Keep run snapshots, statuses, results and patches; omit worker internals.
+      IGNORE_MATCH: "job.json claimed.json mcp.json claude.jsonl run.log /app/code/.whalehub/runs/.pending-*"
     volumes:
-      - .:/app/code
-      - ./.chat_history:/app/chat_history
-      - ./attendance_id:/app/sync/attendance_id
+      # Expose learner artifacts only, never app source or copied worktrees.
+      - ./ticket_parser/.whalehub:/app/code/ticket_parser/.whalehub:ro
+      - ./whalehub/data:/app/code/whalehub/data:ro
+      - ./.whalehub/runs:/app/code/.whalehub/runs:ro
+      - ./.whalehub/state/test-issues:/app/code/.whalehub/test-issues:ro
+      - type: bind
+        source: ./.whalehub/state/activity.log
+        target: /app/code/.whalehub/activity.log
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./.chat_history:/app/chat_history:ro
+      - ./attendance_id:/app/sync/attendance_id:ro
     tty: true
     stdin_open: true
   claude_session_sync_filter:

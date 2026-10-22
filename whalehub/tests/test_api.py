@@ -1,6 +1,7 @@
 """Exercise boundaries in disposable repositories; never initialise the source tree."""
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -922,3 +923,169 @@ def test_main_runs_and_tests_share_the_busy_rule(exercise, first_test):
     finish(directory)
     assert client.post('/api/workflow-tests', json={
         'workflow_path': '.whalehub/triage.md', 'source': TEST_WORKFLOW, 'issue': DEMO_ISSUE}).status_code == 202
+
+
+def activity_entries(config):
+    return (config['STATE_PATH'] / 'activity.log').read_text().splitlines()
+
+
+def test_activity_records_actions_without_polling_noise(exercise):
+    _, client, _, config = exercise
+    assert client.get('/').status_code == 200
+    click = {'control': 'save', 'label': 'Save workflow', 'tab': '#workflows', 'target': '.whalehub/triage.md'}
+    assert client.post('/api/activity', json=click).status_code == 204
+    saved = save(client).json
+    assert client.post('/api/workflows', json={'path': '.whalehub/new.md'}).status_code == 201
+    created = client.post('/api/issues', json=DEMO_ISSUE).json
+    assert client.put('/api/issues/' + str(created['id']), json={**DEMO_ISSUE, 'title': 'Updated title'}).status_code == 200
+    assert client.post('/api/issues/' + str(created['id']) + '/comments', json={'body': 'A learner comment.'}).status_code == 201
+    directory = publish(exercise)
+    before = (config['STATE_PATH'] / 'activity.log').read_bytes()
+    for url in ['/health', '/api/files', '/api/files?path=.whalehub/triage.md', '/api/workflows',
+                '/api/issues', '/api/runs', '/api/runs/' + directory.name, '/api/workflow-tests']:
+        assert client.get(url).status_code == 200
+    assert (config['STATE_PATH'] / 'activity.log').read_bytes() == before
+    entries = activity_entries(config)
+    assert len(entries) == 8
+    assert all(re.match(r'^\[\d{2}:\d{2}:\d{2}\] \S', entry) for entry in entries)
+    assert entries[0].endswith('Opened Whalehub')
+    assert entries[1].endswith('Clicked Save workflow (workflows, .whalehub/triage.md)')
+    assert entries[2].endswith(f"Saved workflow .whalehub/triage.md (commit {saved['commit'][:8]})")
+    assert 'Created workflow .whalehub/new.md' in entries[3]
+    assert f"Created issue #{created['id']}: {DEMO_ISSUE['title']}" in entries[4]
+    assert f"Updated issue #{created['id']}: Updated title" in entries[5]
+    assert f"Commented on #{created['id']} (comment #1)" in entries[6]
+    assert entries[-1].endswith(f'Queued run .whalehub/triage.md for #1 (run {directory.name})')
+
+
+def test_test_activity_preserves_the_unsaved_snapshot_after_claim(exercise):
+    _, client, repo, config = exercise
+    saved = (repo / '.whalehub/triage.md').read_bytes()
+    source = TEST_WORKFLOW + '\nTry these unsaved instructions.\n'
+    directory = publish_test(exercise, source)
+    snapshot = module.read_json(directory / 'run.json')
+    assert snapshot == module.read_json(directory / 'job.json')
+    (directory / 'job.json').rename(directory / 'claimed.json')
+    assert snapshot['test'] is True and snapshot['workflow']['source'] == source
+    assert snapshot['event']['issue']['title'] == DEMO_ISSUE['title']
+    assert module.read_json(directory / 'run.json') == snapshot
+    assert (repo / '.whalehub/triage.md').read_bytes() == saved
+    assert client.get('/api/workflow-tests/' + directory.name).status_code == 200
+    entry, = activity_entries(config)
+    assert entry.endswith(f'Queued test .whalehub/triage.md for #1 (run {directory.name})')
+
+
+@pytest.mark.parametrize('claimed', [False, True])
+def test_startup_snapshots_existing_runs_without_logging_new_activity(exercise, claimed):
+    _, _, _, config = exercise
+    directory = publish(exercise)
+    snapshot = module.read_json(directory / 'job.json')
+    (directory / 'run.json').unlink()
+    if claimed:
+        (directory / 'job.json').rename(directory / 'claimed.json')
+    before = (config['STATE_PATH'] / 'activity.log').read_bytes()
+    module.create_app(config)
+    assert module.read_json(directory / 'run.json') == snapshot
+    assert (directory / ('claimed.json' if claimed else 'job.json')).exists()
+    assert (config['STATE_PATH'] / 'activity.log').read_bytes() == before
+
+
+def test_automatic_run_activity_follows_the_issue_creation(exercise):
+    app, client, _, config = exercise
+    app.config['EXECUTION_ENABLED'] = True
+    assert save(client, WORKFLOW.replace('trigger: manual', 'trigger: issue_created')).status_code == 200
+    created = client.post('/api/issues', json=DEMO_ISSUE).json
+    issue, queued = activity_entries(config)[-2:]
+    assert f"Created issue #{created['id']}" in issue
+    assert queued.endswith(f"Queued run .whalehub/triage.md for #{created['id']} automatically "
+                           f"(run {created['triggered_runs'][0]['run_id']})")
+
+
+@pytest.mark.parametrize('test', [False, True])
+def test_agent_activity_identifies_the_run_and_test_scope(exercise, test):
+    _, client, _, config = exercise
+    if test:
+        directory = publish_test(exercise)
+    else:
+        assert save(client, TEST_WORKFLOW).status_code == 200
+        directory = publish(exercise)
+    assert set_labels(client, directory, ['maintenance']).status_code == 200
+    assert client.post('/api/runs/' + directory.name + '/comments',
+                       json={'issue_number': 1, 'body': 'Agent comment.'}).status_code == 201
+    assert client.post('/api/runs/' + directory.name + '/issues', json=DEMO_ISSUE).status_code == 201
+    entries = activity_entries(config)[-3:]
+    assert 'Agent: Set labels on #1: maintenance' in entries[0]
+    assert 'Agent: Commented on #1 (comment #1)' in entries[1]
+    assert 'Agent: Created issue #' in entries[2]
+    scope = f"({'test, ' if test else ''}run {directory.name})"
+    assert all(entry.endswith(scope) for entry in entries)
+
+
+@pytest.mark.parametrize('data', [
+    {}, {'control': 'save', 'actor': 'agent'}, {'control': ['save']}, {'control': 'x' * 257},
+])
+def test_invalid_clicks_do_not_create_activity(exercise, data):
+    _, client, _, config = exercise
+    assert client.post('/api/activity', json=data).status_code == 400
+    assert not (config['STATE_PATH'] / 'activity.log').exists()
+
+
+def test_failed_save_is_logged_without_a_success_event(exercise):
+    _, client, repo, config = exercise
+    before = (repo / '.whalehub/triage.md').read_bytes()
+    response = save(client, 'Invalid workflow')
+    assert response.status_code == 400
+    entry, = activity_entries(config)
+    assert entry.endswith('Failed PUT /api/workflows (400): ' + response.json['error'])
+    assert (repo / '.whalehub/triage.md').read_bytes() == before
+
+
+def test_concurrent_clicks_append_complete_activity_lines(exercise):
+    app, _, _, config = exercise
+
+    def click(number):
+        with app.test_client() as client:
+            return client.post('/api/activity', json={'control': 'test-workflow', 'target': str(number)}).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(click, range(24))) == [204] * 24
+    entries = activity_entries(config)
+    assert len(entries) == 24
+    assert {entry.split('] ', 1)[1] for entry in entries} == {
+        f'Clicked test-workflow ({number})' for number in range(24)}
+
+
+def test_activity_keeps_multiline_text_in_one_log_entry(exercise):
+    _, client, _, config = exercise
+    assert client.post('/api/activity', json={
+        'control': 'test-workflow', 'label': 'Test\nworkflow', 'target': 'one\r\ntwo',
+    }).status_code == 204
+    entry, = activity_entries(config)
+    assert entry.endswith('Clicked Test workflow (one two)')
+
+
+def test_existing_jsonl_activity_is_converted_once(exercise):
+    _, _, _, config = exercise
+    legacy = config['STATE_PATH'] / 'activity.jsonl'
+    entries = [
+        {'timestamp': '2026-10-22T15:19:45+00:00', 'actor': 'learner', 'action': 'app_opened'},
+        {'timestamp': '2026-10-22T15:19:47+00:00', 'actor': 'learner', 'action': 'workflow_test_queued',
+         'workflow_path': '.whalehub/triage.md', 'issue_id': 1, 'run_id': 'a' * 32},
+    ]
+    original = ''.join(json.dumps(entry) + '\n' for entry in entries)
+    legacy.write_text(original)
+    # setup.sh may already have created the log that sync bind-mounts.
+    log = config['STATE_PATH'] / 'activity.log'
+    log.touch()
+    inode = log.stat().st_ino
+    module.create_app(config)
+    assert activity_entries(config) == [
+        '[15:19:45] Opened Whalehub',
+        '[15:19:47] Queued test .whalehub/triage.md for #1 (run ' + 'a' * 32 + ')',
+    ]
+    assert not legacy.exists()
+    assert (config['STATE_PATH'] / 'activity.migrated.jsonl').read_text() == original
+    assert log.stat().st_ino == inode
+    before = log.read_bytes()
+    module.create_app(config)
+    assert log.read_bytes() == before

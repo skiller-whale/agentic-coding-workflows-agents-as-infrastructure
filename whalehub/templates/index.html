@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Whalehub</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+</head>
+<body data-execution="{{ 'true' if execution_enabled else 'false' }}">
+<header><h1>Whalehub</h1></header>
+<main>
+  <nav class="tabs" role="tablist" aria-label="Repository">
+    <a id="tab-code" data-label="Code" role="tab" href="#code" aria-controls="code" aria-selected="true">Code</a>
+    <a id="tab-issues" data-label="Issues" role="tab" href="#issues" aria-controls="issues-panel" aria-selected="false" tabindex="-1">Issues</a>
+    <a id="tab-workflows" data-label="Workflows" role="tab" href="#workflows" aria-controls="workflows-panel" aria-selected="false" tabindex="-1">Workflows</a>
+    <a id="tab-runs" data-label="Runs" role="tab" href="#runs" aria-controls="runs" aria-selected="false" tabindex="-1">Runs</a>
+    <a id="tab-help" data-label="Help" role="tab" href="#help" aria-controls="help" aria-selected="false" tabindex="-1">Help</a>
+  </nav>
+  <p id="error" role="alert" hidden></p>
+  <div id="code" role="tabpanel" aria-labelledby="tab-code">
+    <div class="workspace">
+      <section class="file-sidebar" aria-labelledby="files-heading">
+        <h2 id="files-heading">ticket_parser</h2>
+        <nav id="file-tree" class="file-tree" aria-label="Repository files"></nav>
+      </section>
+      <section class="source-panel" aria-labelledby="code-heading">
+        <div class="toolbar"><h2 id="code-heading">Choose a file</h2><span class="muted">Read-only</span></div>
+        <div id="code-editor" class="editor" aria-label="Source file"></div>
+      </section>
+    </div>
+  </div>
+  <div id="issues-panel" role="tabpanel" aria-labelledby="tab-issues" hidden>
+    <div class="workspace">
+      <section class="issue-sidebar" aria-labelledby="issues-heading">
+        <div class="toolbar"><h2 id="issues-heading">Issues</h2><button id="new-issue" type="button">New issue</button></div>
+        <nav id="issue-list" class="issue-list" aria-label="Issues"></nav>
+      </section>
+      <section class="issue-detail" aria-label="Selected issue">
+        <p id="issue-placeholder" class="muted">Choose an issue or create a new one.</p>
+        <div id="issue-create" hidden><h2>New issue</h2><div id="new-issue-form"></div></div>
+        <div id="issues"></div>
+      </section>
+    </div>
+  </div>
+  <div id="workflows-panel" role="tabpanel" aria-labelledby="tab-workflows" hidden>
+    <div class="workspace workflow-workspace">
+      <section class="workflow-sidebar" aria-labelledby="workflows-heading">
+        <div class="toolbar"><h2 id="workflows-heading">Workflows</h2><button id="new-workflow" type="button">New workflow</button></div>
+        <p id="workflows-empty" class="muted" hidden>No workflows found.</p>
+        <nav id="workflows" class="workflow-list" aria-label="Workflows"></nav>
+      </section>
+      <div class="workflow-panel" role="region" aria-label="Selected workflow">
+        <section id="workflow-placeholder" class="muted">Choose a workflow to edit.</section>
+        <section id="workflow-create" hidden>
+          <h2>New workflow</h2>
+          <form id="workflow-form" class="run-form">
+            <label>Filename <input id="workflow-filename" placeholder="review.md" required maxlength="200"></label>
+            <p class="muted">Creates a Markdown file in .whalehub with settings and instructions you can edit.</p>
+            <div class="form-actions"><button id="create-workflow" type="submit">Create workflow</button><button id="cancel-workflow" type="button">Cancel</button></div>
+          </form>
+        </section>
+        <div id="workflow-detail" hidden>
+          <div class="workflow-content">
+            <aside id="workflow-guide" class="help-panel workflow-guide" aria-labelledby="workflow-guide-heading" hidden>
+              <h3 id="workflow-guide-heading">Workflow guide</h3>
+              {% with inline_guide = true %}
+              {% include 'workflow_guide.html' %}
+              {% endwith %}
+            </aside>
+            <div class="workflow-main">
+              <section class="workflow-definition" aria-label="Workflow definition">
+                <div class="workflow-header">
+                  <div class="toolbar"><h2 id="editor-heading"></h2><button id="discard-workflow" type="button" hidden>Discard</button><button id="save" type="button">Save workflow</button></div>
+                  <div class="toolbar workflow-meta">
+                    <button id="toggle-workflow-guide" type="button" aria-expanded="false" aria-controls="workflow-guide">Workflow guide</button>
+                    <p id="workflow-path" class="muted"></p>
+                  </div>
+                </div>
+                <p id="workflow-error" class="notice" hidden></p>
+                <div id="editor" class="editor" aria-label="Workflow editor"></div>
+                <p id="save-status" role="status" hidden></p>
+                <p class="muted save-note">Saving commits this workflow on main.</p>
+              </section>
+              <section class="workflow-test" aria-labelledby="workflow-test-heading">
+                <h3 id="workflow-test-heading">Test workflow</h3>
+                <p class="muted">Try the current editor contents without saving. This demo issue stays separate from repository issues. Each test starts fresh.</p>
+                <form id="workflow-test-form" class="issue-form">
+                  <label>Demo issue title <input id="workflow-test-title" required maxlength="200"></label>
+                  <label>Demo issue description <textarea id="workflow-test-body" required rows="3"></textarea></label>
+                  <div class="form-actions"><button id="test-workflow" type="submit" {% if not execution_enabled %}disabled{% endif %}>Test workflow</button></div>
+                  <p id="workflow-test-availability" class="muted" role="status" hidden></p>
+                </form>
+                <p id="workflow-test-error" class="notice" role="alert" hidden></p>
+              </section>
+              <details id="workflow-test-result" class="workflow-test-result" aria-labelledby="workflow-test-result-heading" hidden open>
+                <summary class="toolbar"><span id="workflow-test-result-heading" class="panel-title">Latest test</span><span id="workflow-test-state" class="run-state"></span><time id="workflow-test-created" class="muted"></time></summary>
+                <div class="workflow-test-result-body">
+                  <p id="workflow-test-status" class="muted" role="status"></p>
+                  <p id="workflow-test-draft" class="notice" hidden>The editor has changed since this test. Test again to try your latest edits.</p>
+                  <p id="workflow-test-result-error" class="notice" hidden></p>
+                  <h4>Test issues</h4>
+                  <div id="workflow-test-issues"></div>
+                  <details id="workflow-test-log-panel"><summary>Log</summary><pre id="workflow-test-log"></pre></details>
+                  <p id="workflow-test-unfinished" class="notice" hidden>This test left uncommitted changes. The patch includes them.</p>
+                  <details id="workflow-test-patch-panel" hidden open><summary>Changes (read-only)</summary><div id="workflow-test-patch" class="editor"></div></details>
+                  <details><summary>Tested workflow</summary><pre id="workflow-test-source"></pre></details>
+                  <details><summary>Test details</summary><pre id="workflow-test-metadata"></pre></details>
+                </div>
+              </details>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="runs" role="tabpanel" aria-labelledby="tab-runs" hidden>
+    <div class="workspace">
+      <section class="run-sidebar" aria-labelledby="runs-heading">
+        <div class="toolbar"><h2 id="runs-heading">Runs</h2><button id="new-run" type="button">New run</button></div>
+        <p id="runs-empty" class="muted" hidden>No runs yet.</p>
+        <nav id="run-list" class="run-list" aria-label="Runs"></nav>
+      </section>
+      <section class="run-panel" aria-label="Selected run">
+        <p id="run-placeholder" class="muted">Choose a run or start a workflow.</p>
+        <div id="run-create" hidden>
+          <h2>New run</h2>
+          <p class="muted">Choose a workflow and issue. Runs use the saved workflow file.</p>
+          <form id="run-form" class="run-form">
+            <label>Workflow <select id="run-workflow" required></select></label>
+            <label>Issue (optional) <select id="run-issue"><option value="">No issue</option></select></label>
+            <p id="run-availability" class="muted" role="status" hidden></p>
+            <div class="form-actions"><button id="run" type="submit" {% if not execution_enabled %}disabled{% endif %}>Run workflow</button><button id="cancel-run" type="button">Cancel</button></div>
+          </form>
+        </div>
+        <div id="run-detail" hidden>
+          <div class="toolbar"><h2 id="run-heading"></h2><span id="run-state" class="run-state"></span></div>
+          <div class="run-context"><button id="run-issue-link" type="button" class="text-link"></button><time id="run-created" class="muted"></time></div>
+          <p id="run-status" class="muted" role="status"></p>
+          <div id="run-outcome" hidden><h3>Summary</h3><p id="run-summary" class="run-summary"></p></div>
+          <p id="run-check" hidden></p>
+          <p id="run-result-error" class="notice" hidden></p>
+          <p id="run-unfinished" class="notice" hidden>This run left uncommitted changes. The patch includes them.</p>
+          <details id="run-log-panel"><summary>Log</summary><pre id="run-log"></pre></details>
+          <details id="patch-panel" hidden open><summary>Changes (read-only)</summary><div id="patch" class="editor"></div></details>
+          <details id="run-metadata"><summary>Run details</summary><pre id="run-result"></pre></details>
+        </div>
+      </section>
+    </div>
+  </div>
+  <section id="help" class="help-panel" role="tabpanel" aria-labelledby="tab-help" hidden>
+    {% include 'workflow_guide.html' %}
+  </section>
+</main>
+</body>
+</html>

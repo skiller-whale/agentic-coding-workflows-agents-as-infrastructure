@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "title": "Clean up style issues in ticket_parser.py",
+    "body": "Remove the redundant pass from TicketParseError (its docstring already provides a class body). Remove the unused List import, retaining imports used by annotations. Simplify the unnecessary elif following a raise in the paragraph-handling code. Preserve parser behaviour.",
+    "labels": [],
+    "comments": []
+  },
+  {
+    "id": 2,
+    "title": "Migrate from markdown-it-py to markdown-it-pyrs",
+    "body": "Investigate replacing the Markdown parser dependency to improve parsing performance. Research the replacement API and installation requirements, then update dependencies and parser code as needed. Verify that the migration preserves ticket parsing and validation behaviour. Compare parsing performance before and after the migration.",
+    "labels": [],
+    "comments": []
+  }
+]

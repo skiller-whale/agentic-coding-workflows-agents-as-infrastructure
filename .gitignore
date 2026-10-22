@@ -1,0 +1,9 @@
+/.whalehub/
+/attendance_id
+/ticket_parser/.git
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.DS_Store
+node_modules/

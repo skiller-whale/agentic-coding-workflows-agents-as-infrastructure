@@ -20,6 +20,24 @@ async function api(path, options = {}) {
   if (!response.ok) throw new Error(value.error || `Request failed (${response.status})`);
   return value;
 }
+// Record deliberate interactions, not polling or editor keystrokes.
+document.addEventListener('click', event => {
+  const control = event.target.closest('button, a, summary');
+  if (!control || control.disabled || control.closest('.cm-editor')) return;
+  const context = window.location.hash === '#workflows' ? opened?.path
+    : window.location.hash === '#runs' ? selectedRun
+    : window.location.hash === '#issues' ? String(selectedIssue ?? '') : '';
+  const target = control.dataset.workflowPath || control.dataset.runId || control.dataset.issueId
+    || control.getAttribute('aria-label') || control.title
+    || control.closest('[data-issue-id]')?.dataset.issueId || context || '';
+  const data = {
+    control: control.id || control.closest('details')?.id || control.tagName.toLowerCase(),
+    label: (control.dataset.label || control.textContent).trim().replace(/\s+/g, ' ').slice(0, 256),
+    tab: window.location.hash || '#code', target: target.slice(0, 256),
+  };
+  fetch('/api/activity', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data), keepalive: true}).catch(() => {});
+}, {capture: true});
 function button(label, action) {
   const value = document.createElement('button'); value.type = 'button'; value.textContent = label;
   value.addEventListener('click', () => action().catch(e => error(e.message))); return value;

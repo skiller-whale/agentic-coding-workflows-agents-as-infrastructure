@@ -8,11 +8,13 @@ and runs at matching `/workspace/...` paths.
 
 Flask refuses manual run submission while any job is running or waiting.
 Automatic issue-creation jobs can queue while the worker is busy. It writes
-`status.json` and `job.json` into a hidden `.pending-*` directory, then atomically publishes the
+`status.json`, `run.json` and `job.json` into a hidden `.pending-*` directory, then atomically publishes the
 run directory. IDs are 32 lowercase hexadecimal characters. The worker holds an
 exclusive `worker.lock` and claims jobs by renaming `job.json` to `claimed.json`.
 The snapshot is immutable throughout execution. JSON writes use temporary files
 and atomic replacement; Flask serializes updates with a private `app.lock`.
+`run.json` retains a copy of the job snapshot for learner sync, independently of
+the worker's queue files. Startup fills in missing snapshots for existing runs.
 
 On worker restart, unfinished claimed jobs become failed without replaying Claude
 or tools. Logs, metadata and artifacts remain available. Unclaimed jobs can still
@@ -192,3 +194,25 @@ The worker reads `WHALEHUB_REPO`, `WHALEHUB_RUNS`, `WHALEHUB_WORKTREES`,
 (`/app/sync/attendance_id`). The attendance file is read-only, read for each run,
 and never written into job, status or result files. Empty credentials fail before
 invoking Claude. `/health` describes configuration, not worker liveness.
+
+## Learner sync
+
+Run `./setup.sh` before starting or recreating Compose services. It creates the
+activity log and test-issue directory without clearing existing progress.
+
+Sync has read-only mounts for saved `ticket_parser/.whalehub/*.md` workflows,
+`whalehub/data/issues.json`, run snapshots/statuses/results/patches, test issues
+and app activity. Worktrees and app source are not mounted. Queue files
+(`job.json`, `claimed.json`), MCP configuration and raw Claude output are excluded.
+Host Claude session sync remains a separate mount.
+
+The app appends plain text to `.whalehub/state/activity.log`, exposed to sync as
+`code/.whalehub/activity.log`. Each entry is one line, starting with `[HH:MM:SS]`
+in UTC, followed by a short description. Entries record page opens, deliberate UI
+clicks (label, tab and target), workflow saves/creation, queued runs/tests,
+issue changes and failed mutation requests. Server events include relevant
+workflow, issue and run IDs; agent changes are attributed separately and marked
+when scoped to a test. Polling and editor keystrokes are not recorded. Run
+`status.json` files supply the current execution state; the activity log records
+submission, not every worker status transition.
+Startup converts existing JSONL activity once and archives the original file.

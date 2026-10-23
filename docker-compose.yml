@@ -92,7 +92,7 @@ services:
       # Polling applies ignore rules to every change and detects bind-mounted log writes.
       FORCE_POLL: "1"
       # Keep run snapshots, statuses, results and patches; omit worker internals.
-      IGNORE_MATCH: "job.json claimed.json mcp.json claude.jsonl run.log /app/code/.whalehub/runs/.pending-*"
+      IGNORE_MATCH: "job.json claimed.json stop.json control.lock mcp.json claude.jsonl run.log /app/code/.whalehub/runs/.pending-*"
     volumes:
       # Expose learner artifacts only, never app source or copied worktrees.
       - ./ticket_parser/.whalehub:/app/code/ticket_parser/.whalehub:ro

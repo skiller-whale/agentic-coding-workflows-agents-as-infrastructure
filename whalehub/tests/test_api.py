@@ -75,6 +75,43 @@ def finish(path, result=TRIAGE, status="succeeded"):
     module.write_json(path / "status.json", {"status": status, "message": "Fixture worker completed."})
 
 
+@pytest.mark.parametrize("test", [False, True])
+def test_stop_waiting_workflow_releases_busy_state_and_keeps_routes_separate(exercise, test):
+    app, client, _, config = exercise
+    app.config["EXECUTION_ENABLED"] = True
+    if test:
+        response = client.post("/api/workflow-tests", json={
+            "workflow_path": ".whalehub/triage.md", "source": WORKFLOW,
+            "issue": {"title": "Demo", "body": "Demo body"}})
+    else:
+        response = client.post("/api/runs", json={"workflow_path": ".whalehub/triage.md", "issue_id": 1})
+    assert response.status_code == 202, response.json
+    identifier = response.json["run_id"]
+    path = config["RUNS_PATH"] / identifier
+    endpoint = ("/api/workflow-tests/" if test else "/api/runs/") + identifier
+    other = ("/api/runs/" if test else "/api/workflow-tests/") + identifier
+    assert client.post(other + "/stop").status_code == 404
+    stopped = client.post(endpoint + "/stop")
+    assert stopped.status_code == 202 and stopped.json["status"] == "stopped"
+    assert client.post(endpoint + "/stop").status_code == 409
+    assert client.get(endpoint).json["status"] == "stopped"
+    assert (path / "job.json").exists() and not (path / "claimed.json").exists()
+    assert client.get("/api/runs").json["busy"] is False
+    assert client.post("/api/runs", json={"workflow_path": ".whalehub/triage.md", "issue_id": 1}).status_code == 202
+
+
+def test_stop_claimed_run_blocks_agent_issue_tools(exercise):
+    _, client, _, _ = exercise
+    path = publish(exercise)
+    (path / "job.json").rename(path / "claimed.json")
+    prefix = "/api/runs/" + path.name
+    assert client.post(prefix + "/stop").status_code == 202
+    detail = client.get(prefix).json
+    assert detail["status"] == "running" and detail["stop_requested"] is True
+    assert detail["message"] == "Stopping workflow…"
+    assert client.post(prefix + "/labels", json={"issue_number": 1, "labels": ["new"]}).status_code == 409
+
+
 def test_code_browser_boundaries(exercise, tmp_path):
     _, client, repo, _ = exercise
     (repo / "src" / "__pycache__").mkdir()

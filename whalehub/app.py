@@ -148,6 +148,9 @@ def activity_line(entry):
         if entry.get("trigger") == "issue_created":
             message += " automatically"
         message += f" (run {entry['run_id']})"
+    elif action in {"workflow_test_stopped", "workflow_run_stopped"}:
+        kind = "test" if action == "workflow_test_stopped" else "run"
+        message = f"Requested stop for {kind} {path} (run {entry['run_id']})"
     elif action in {"issue_created", "issue_updated"}:
         message = f"{'Created' if action == 'issue_created' else 'Updated'} issue {issue}: {entry['title']}"
     elif action == "issue_comment_added":
@@ -325,6 +328,35 @@ def create_app(config=None):
             # The worker's atomic claim may happen immediately before this read.
             return read_json(path / "claimed.json")
 
+    @contextmanager
+    def run_locked(path):
+        with (path / "control.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def stop_run(identifier, *, test):
+        with locked():
+            path = run_dir(identifier)
+            job = job_for(path)
+            if bool(job.get("test")) != test:
+                raise APIError("Workflow test not found." if test else "Run not found.", 404)
+            with run_locked(path):
+                status = read_json(path / "status.json")
+                if status["status"] != "running":
+                    raise APIError("This workflow has already finished.", 409)
+                if not (path / "stop.json").exists():
+                    write_json(path / "stop.json", {"requested_at": datetime.now(timezone.utc).isoformat(timespec="microseconds")})
+                    if (path / "job.json").exists():
+                        write_json(path / "status.json", {**status, "status": "stopped",
+                                                          "message": "Stopped before the worker started.",
+                                                          "finished_at": datetime.now(timezone.utc).isoformat(timespec="microseconds")})
+                    activity("workflow_test_stopped" if test else "workflow_run_stopped",
+                             run_id=identifier, workflow_path=job["workflow"]["path"])
+                return {"run_id": identifier, "status": read_json(path / "status.json")["status"]}, 202
+
     def validate_labels(labels):
         if (not isinstance(labels, list) or any(not isinstance(v, str) or not v.strip() for v in labels)
                 or len(set(labels)) != len(labels)):
@@ -422,7 +454,8 @@ def create_app(config=None):
 
     def tool_job(identifier, tool):
         path = run_dir(identifier)
-        if not (path / "claimed.json").is_file() or read_json(path / "status.json")["status"] != "running":
+        if ((path / "stop.json").exists() or not (path / "claimed.json").is_file()
+                or read_json(path / "status.json")["status"] != "running"):
             raise APIError("Issue tools require an active, claimed run.", 409)
         job = job_for(path)
         if tool not in job["workflow"]["tools"]:
@@ -451,7 +484,9 @@ def create_app(config=None):
             "run_id": path.name, "created_at": job["created_at"],
             "workflow": {k: job["workflow"][k] for k in ("path", "name")},
             "issue_id": event_for(job).get("issue", {}).get("number"), "base_commit": job["base_commit"],
-            **status, "log": (path / "run.log").read_text(encoding="utf-8", errors="replace") if (path / "run.log").exists() else "",
+            **status, "stop_requested": (path / "stop.json").exists(),
+            "message": "Stopping workflow…" if status["status"] == "running" and (path / "stop.json").exists() else status["message"],
+            "log": (path / "run.log").read_text(encoding="utf-8", errors="replace") if (path / "run.log").exists() else "",
             "result": result, "result_error": result_error,
             "patch": (path / "changes.patch").read_text(encoding="utf-8", errors="replace") if (path / "changes.patch").exists() else None,
             "uncommitted_patch": (path / "uncommitted.patch").read_text(encoding="utf-8", errors="replace") if (path / "uncommitted.patch").exists() else None,
@@ -659,7 +694,7 @@ def create_app(config=None):
         with locked():
             paths = directories()
             values = [inspect_run(path) for path in paths if not job_for(path).get("test")]
-            return {"runs": [{k: value[k] for k in ("run_id", "created_at", "workflow", "issue_id", "status", "message")}
+            return {"runs": [{k: value[k] for k in ("run_id", "created_at", "workflow", "issue_id", "status", "message", "stop_requested")}
                              for value in sorted(values, key=lambda v: (v["created_at"], v["run_id"]), reverse=True)],
                     "busy": any(read_json(path / "status.json")["status"] == "running" for path in paths)}
 
@@ -671,11 +706,15 @@ def create_app(config=None):
                 raise APIError("Run not found.", 404)
             return inspect_run(path)
 
+    @app.post("/api/runs/<identifier>/stop")
+    def stop_workflow_run(identifier):
+        return stop_run(identifier, test=False)
+
     @app.get("/api/workflow-tests")
     def list_workflow_tests():
         with locked():
             values = [inspect_run(path) for path in directories() if job_for(path).get("test")]
-            return {"tests": [{k: value[k] for k in ("run_id", "created_at", "workflow", "status", "message")}
+            return {"tests": [{k: value[k] for k in ("run_id", "created_at", "workflow", "status", "message", "stop_requested")}
                               for value in sorted(values, key=lambda v: (v["created_at"], v["run_id"]), reverse=True)]}
 
     @app.get("/api/workflow-tests/<identifier>")
@@ -687,6 +726,10 @@ def create_app(config=None):
                 raise APIError("Workflow test not found.", 404)
             return {**inspect_run(path), "source": job["workflow"]["source"],
                     "issues": [agent_issue(issue) for issue in read_json(issue_store(path, job))]}
+
+    @app.post("/api/workflow-tests/<identifier>/stop")
+    def stop_workflow_test(identifier):
+        return stop_run(identifier, test=True)
 
     @app.post("/api/workflow-tests")
     def start_workflow_test():

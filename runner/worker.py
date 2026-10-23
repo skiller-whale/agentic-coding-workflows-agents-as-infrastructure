@@ -3,6 +3,7 @@
 import argparse
 import codecs
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -86,6 +87,21 @@ class ProcessResult:
     failure: str = ""
 
 
+class RunStopped(Exception):
+    pass
+
+
+class RunStop:
+    def __init__(self, shutdown, directory):
+        self.shutdown, self.marker = shutdown, directory / "stop.json"
+
+    def is_set(self):
+        return self.shutdown.is_set() or self.marker.exists()
+
+    def message(self):
+        return "Stopped by user." if self.marker.exists() else "Interrupted by worker shutdown."
+
+
 def stop_group(process):
     """Also stop children that inherited stdout after their parent exited."""
     try:
@@ -117,9 +133,13 @@ def run_process(command, cwd, env, timeout, stopped, consume):
         selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         try:
             while selector.get_map() or process.poll() is None:
-                if not failure and (stopped.is_set() or time.monotonic() >= deadline):
-                    failure = "Interrupted by worker shutdown." if stopped.is_set() else f"Timed out after {timeout:g} seconds."
-                    stop_group(process)
+                if not failure:
+                    if stopped.is_set():
+                        failure = stopped.message() if hasattr(stopped, "message") else "Interrupted by worker shutdown."
+                    elif time.monotonic() >= deadline:
+                        failure = f"Timed out after {timeout:g} seconds."
+                    if failure:
+                        stop_group(process)
                 for key, _ in selector.select(0.05):
                     name = key.data
                     chunk = os.read(key.fileobj.fileno(), 65536)
@@ -226,6 +246,22 @@ class Worker:
     def directories(self):
         return sorted(p for p in self.config.runs.iterdir() if RUN_ID.fullmatch(p.name) and p.is_dir())
 
+    @contextmanager
+    def run_locked(self, directory):
+        with (directory / "control.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def finish_status(self, directory, status):
+        with self.run_locked(directory):
+            if (directory / "stop.json").exists():
+                status.update(status="stopped", message="Stopped by user.")
+            write_json(directory / "status.json", status)
+            return status
+
     def recover(self):
         for directory in self.directories():
             if not (directory / "claimed.json").exists():
@@ -234,12 +270,13 @@ class Worker:
                 status = read_json(directory / "status.json")
             except (OSError, ValueError):
                 status = {}
-            if status.get("status") in {"succeeded", "failed"}:
+            if status.get("status") in {"succeeded", "failed", "stopped"}:
                 continue
-            message = "Worker restarted after this job was claimed; it will not be replayed. Artifacts and worktree are retained."
+            message = ("Stopped by user." if (directory / "stop.json").exists() else
+                       "Worker restarted after this job was claimed; it will not be replayed. Artifacts and worktree are retained.")
             with (directory / "run.log").open("a", encoding="utf-8") as log:
                 log.write("[Runner] " + message + "\n")
-            write_json(directory / "status.json", {**status, "status": "failed", "message": message, "finished_at": now()})
+            self.finish_status(directory, {**status, "status": "failed", "message": message, "finished_at": now()})
 
     def environment(self, cwd, model):
         attendance = self.config.attendance.read_text(encoding="utf-8").strip()
@@ -263,6 +300,7 @@ class Worker:
 
     def execute(self, directory):
         config, job = self.config, read_json(directory / "claimed.json")
+        stop = RunStop(self.stopped, directory)
         model = job.get("workflow", {}).get("model")
         metadata = {"model": model, "requested_model": model, "claude_version": CLAUDE_VERSION,
                     "started_at": now(), "timeout_seconds": config.timeout, "max_turns": config.max_turns}
@@ -277,6 +315,8 @@ class Worker:
 
             status("Preparing the workflow.")
             try:
+                if stop.marker.exists():
+                    raise RunStopped()
                 if job.get("run_id") != directory.name:
                     raise ValueError("Job run ID does not match its directory.")
                 workflow = job["workflow"]
@@ -301,6 +341,8 @@ class Worker:
                 metadata.update(branch=f"whalehub/run-{directory.name}", worktree=str(checkout), base_commit=base)
                 self.git(config.repo, "worktree", "add", "-b", metadata["branch"], str(checkout), base)
                 log(f"[Runner] Prepared {metadata['branch']} from {base}.\n")
+                if stop.marker.exists():
+                    raise RunStopped()
                 env = self.environment(checkout, model)
                 event = job.get("event")
                 if event is None:
@@ -327,11 +369,13 @@ class Worker:
                            "--permission-mode", "dontAsk", "--strict-mcp-config", "--mcp-config", str(mcp_config)]
                 if allowed:
                     command += ["--allowedTools", ",".join(allowed)]
+                if stop.marker.exists():
+                    raise RunStopped()
                 status("Claude is running.")
                 log(f"[Runner] Claude Code {CLAUDE_VERSION}; model={model}; tools={names}; max turns={max_turns}; timeout={timeout:g}s.\n")
                 with (directory / "claude.jsonl").open("a", encoding="utf-8") as raw:
                     stream = ClaudeStream(log, raw)
-                    execution = run_process(command, checkout, env, timeout, self.stopped, stream.consume)
+                    execution = run_process(command, checkout, env, timeout, stop, stream.consume)
                 metadata["agent_exit_code"] = execution.exit_code
                 if stream.model:
                     metadata["model"] = stream.model
@@ -344,6 +388,8 @@ class Worker:
                 result = {"summary": summary.strip() if isinstance(summary, str) else ""}
                 if not final or final.get("subtype") != "success" or final.get("is_error") is not False:
                     failures.append("Claude did not complete successfully.")
+            except RunStopped:
+                failures.append("Stopped by user.")
             except Exception as error:
                 failures.append(str(error))
             if checkout is not None and checkout.exists():
@@ -373,9 +419,9 @@ class Worker:
             if result is not None:
                 write_json(directory / "result.json", result)
             message = " ".join(failures) if failures else "Workflow completed successfully."
-            log("[Runner] " + message + "\n")
             metadata["finished_at"] = now()
-            status(message, "failed" if failures else "succeeded")
+            final_status = self.finish_status(directory, {**metadata, "status": "failed" if failures else "succeeded", "message": message})
+            log("[Runner] " + final_status["message"] + "\n")
 
     def run(self, once=False):
         self.config.runs.mkdir(parents=True, exist_ok=True)
@@ -392,15 +438,22 @@ class Worker:
                         break
                     if (directory / "claimed.json").exists():
                         continue
-                    try:
-                        (directory / "job.json").rename(directory / "claimed.json")
-                    except FileNotFoundError:
-                        continue
+                    with self.run_locked(directory):
+                        try:
+                            current_status = read_json(directory / "status.json").get("status")
+                        except (OSError, ValueError):
+                            current_status = None
+                        if current_status in {"succeeded", "failed", "stopped"}:
+                            continue
+                        try:
+                            (directory / "job.json").rename(directory / "claimed.json")
+                        except FileNotFoundError:
+                            continue
                     try:
                         self.execute(directory)
                     except Exception as error:
                         # A corrupt job cannot stop later jobs or be retried on restart.
-                        write_json(directory / "status.json", {"status": "failed", "message": str(error), "finished_at": now()})
+                        self.finish_status(directory, {"status": "failed", "message": str(error), "finished_at": now()})
                 if once:
                     break
                 self.stopped.wait(self.config.poll_seconds)

@@ -7,6 +7,7 @@ let savingWorkflow = null, creatingWorkflow = false, workflowListGeneration = 0;
 const demoIssue = {title: 'Fix a typo in the welcome message', body: 'The book club welcome message says "Welcom!". Change it to "Welcome!".'};
 const workflowTests = new Map();
 let startingTest = null, testFormPath = null, renderedTest = null, testPatchEditor, testIssuesSource = null, testListGeneration = 0;
+let stoppingTest = null, stoppingRun = null;
 const issueCards = new Map();
 const issueButtons = new Map();
 let selectedIssue = null, creatingIssue = false;
@@ -378,7 +379,7 @@ function renderTestIssues(issues) {
 }
 function showWorkflowTest() {
   updateTestControls();
-  if (!opened) return;
+  if (!opened) { $('stop-workflow-test').hidden = true; return; }
   const test = testFor(opened.path);
   if (testFormPath !== opened.path) {
     testFormPath = opened.path;
@@ -388,6 +389,8 @@ function showWorkflowTest() {
   const run = test.result;
   $('workflow-test-result').hidden = !run;
   $('workflow-test-result').style.setProperty('--test-result-min-height', `${test.minimumHeight}px`);
+  $('stop-workflow-test').hidden = !run || run.status !== 'running';
+  $('stop-workflow-test').disabled = !run || run.stop_requested || stoppingTest === run.run_id;
   if (!run) return;
   if (renderedTest !== run.run_id) {
     $('workflow-test-result').open = true;
@@ -462,6 +465,16 @@ async function startWorkflowTest() {
   } catch (e) { test.error = e.message; }
   finally { startingTest = null; updateRunControls(); if (opened?.path === path) showWorkflowTest(); }
 }
+async function stopWorkflowTest() {
+  if (!opened) return;
+  const path = opened.path, test = testFor(path), identifier = test.result?.run_id;
+  if (!identifier || test.result.status !== 'running' || test.result.stop_requested || stoppingTest) return;
+  stoppingTest = identifier; showWorkflowTest();
+  try {
+    await api('/api/workflow-tests/' + identifier + '/stop', {method: 'POST'});
+    await Promise.all([loadWorkflowTest(path, identifier), loadHistory()]);
+  } finally { stoppingTest = null; if (opened?.path === path) showWorkflowTest(); }
+}
 function updateRunControls() {
   const validWorkflow = workflowItems.some(item => item.path === $('run-workflow').value && item.valid);
   $('run').disabled = !execution || busy || startingRun || Boolean(startingTest) || !validWorkflow;
@@ -527,6 +540,8 @@ async function loadRun(identifier) {
   $('run-issue-link').textContent = `Issue #${run.issue_id}`; $('run-issue-link').dataset.issueId = run.issue_id;
   $('run-created').dateTime = run.created_at; $('run-created').textContent = new Date(run.created_at).toLocaleString();
   $('run-status').textContent = run.message;
+  $('stop-workflow-run').hidden = run.status !== 'running';
+  $('stop-workflow-run').disabled = run.stop_requested || stoppingRun === identifier;
   const log = run.log || 'No log yet.';
   if ($('run-log').textContent !== log) $('run-log').textContent = log;
   $('run-outcome').hidden = !run.result?.summary; $('run-summary').textContent = run.result?.summary || '';
@@ -574,6 +589,18 @@ async function startRun() {
     await Promise.all([showRun(value.run_id), loadHistory()]);
   } finally { startingRun = false; updateRunControls(); }
 }
+async function stopRun() {
+  const identifier = selectedRun;
+  if (!identifier || stoppingRun || $('stop-workflow-run').hidden || $('stop-workflow-run').disabled) return;
+  stoppingRun = identifier; $('stop-workflow-run').disabled = true;
+  try {
+    await api('/api/runs/' + identifier + '/stop', {method: 'POST'});
+    await Promise.all([loadRun(identifier), loadHistory()]);
+  } catch (e) {
+    if (selectedRun === identifier) $('stop-workflow-run').disabled = false;
+    throw e;
+  } finally { stoppingRun = null; }
+}
 $('new-workflow').addEventListener('click', () => {
   creatingWorkflow = true; updateWorkflowSelection(); $('workflow-filename').focus();
 });
@@ -601,6 +628,7 @@ $('toggle-workflow-guide').addEventListener('click', () => {
   $('toggle-workflow-guide').setAttribute('aria-expanded', String(!guide.hidden));
 });
 $('workflow-test-form').addEventListener('submit', event => { event.preventDefault(); startWorkflowTest().catch(e => error(e.message)); });
+$('stop-workflow-test').addEventListener('click', () => stopWorkflowTest().catch(e => error(e.message)));
 for (const [field, id] of [['title', 'workflow-test-title'], ['body', 'workflow-test-body']]) {
   $(id).addEventListener('input', () => { if (opened) testFor(opened.path).issue[field] = $(id).value; });
 }
@@ -608,6 +636,7 @@ $('discard-workflow').addEventListener('click', () => {
   if (opened?.dirty && window.confirm('Discard unsaved workflow edits?')) openWorkflow(opened.path, true).catch(e => error(e.message));
 });
 $('run-form').addEventListener('submit', event => { event.preventDefault(); startRun().catch(e => error(e.message)); });
+$('stop-workflow-run').addEventListener('click', () => stopRun().catch(e => error(e.message)));
 $('new-run').addEventListener('click', () => newRun().catch(e => error(e.message)));
 $('cancel-run').addEventListener('click', () => { creatingRun = false; showRunSelection(); });
 $('run-workflow').addEventListener('change', updateRunControls);

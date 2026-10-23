@@ -16,11 +16,20 @@ and atomic replacement; Flask serializes updates with a private `app.lock`.
 `run.json` retains a copy of the job snapshot for learner sync, independently of
 the worker's queue files. Startup fills in missing snapshots for existing runs.
 
-On worker restart, unfinished claimed jobs become failed without replaying Claude
-or tools. Logs, metadata and artifacts remain available. Unclaimed jobs can still
-execute. A second worker cannot claim or recover another active worker's jobs.
+On worker restart, unfinished claimed jobs become failed (or stopped when a stop
+was requested) without replaying Claude or tools. Logs, metadata and artifacts
+remain available. Unclaimed jobs can still execute. A second worker cannot claim
+or recover another active worker's jobs.
 The worker executes queued jobs one at a time. Waiting jobs retain the existing
 `running` status with a "Waiting for the worker" message until claimed.
+
+Stopping a run or test writes a `stop.json` request. A waiting job becomes
+`stopped` immediately and is never claimed. For a claimed job, the worker checks
+the request while preparing and while Claude runs, terminates Claude's process
+group, then saves available logs and Git artifacts before marking it `stopped`.
+The per-run `control.lock` serializes claiming and final status updates with stop
+requests. A stop request that arrives after completion returns 409. Stopped jobs
+are not replayed after a worker restart.
 
 `trigger: issue_created` is checked on each successful user issue
 creation. Flask reads each saved `.whalehub/*.md` definition and queues one run
@@ -89,7 +98,7 @@ commits and reports. Success means Claude returned a successful completion with
 exit code zero and artifact collection succeeded. It does not independently
 verify the task or tests. Missing completion events, CLI errors and timeouts fail.
 
-`status.json` contains status (`running`, `succeeded`, `failed`) and a message,
+`status.json` contains status (`running`, `succeeded`, `failed`, `stopped`) and a message,
 plus model/requested model, pinned CLI version, start/finish times, limits,
 agent exit code, branch, worktree and base commit when available.
 
@@ -162,6 +171,9 @@ result, patches and a nullable `issue_id`. Reading results has no update side
 effects. The browser polls the list, selected detail and issues while any run is
 active, including while preparing another run. It preserves selection, drafts and
 disclosures, ignores stale detail responses and retries refresh failures.
+`POST /api/runs/<id>/stop` requests cancellation of a running or waiting run.
+Run detail and list responses include `stop_requested` so the UI disables the
+button while the worker finishes.
 
 ### Workflow tests
 
@@ -187,6 +199,9 @@ demo-issue drafts. Test jobs are excluded from `GET /api/runs` and return 404 fr
 its regular detail route. The shared `GET /api/runs` response also includes `busy`
 so manual-run controls and polling account for active tests without listing them.
 The run-scoped issue-tool URLs stay the same for the existing MCP server.
+`POST /api/workflow-tests/<id>/stop` follows the same stop contract. Run and test
+stop routes reject IDs belonging to the other type with 404. Issue tools reject
+requests once a stop is requested.
 
 The worker reads `WHALEHUB_REPO`, `WHALEHUB_RUNS`, `WHALEHUB_WORKTREES`,
 `WHALEHUB_API_URL`, `WHALEHUB_TIMEOUT_SECONDS` (180), `WHALEHUB_MAX_TURNS` (12),
@@ -203,7 +218,7 @@ runtime directories without clearing existing progress.
 Sync has read-only mounts for saved `ticket_parser/.whalehub/*.md` workflows,
 `whalehub/data/issues.json`, run snapshots/statuses/results/patches, test issues
 and app activity. Worktrees and app source are not mounted. Queue files
-(`job.json`, `claimed.json`), MCP configuration and raw Claude output are excluded.
+(`job.json`, `claimed.json`, `stop.json`, `control.lock`), MCP configuration and raw Claude output are excluded.
 Host Claude session sync remains a separate mount.
 
 `FORCE_POLL=1` keeps sync on its polling path. In learnersync 0.2.8, live file

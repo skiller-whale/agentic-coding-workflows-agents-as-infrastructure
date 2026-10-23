@@ -88,7 +88,7 @@
                 <form id="workflow-test-form" class="issue-form">
                   <label>Demo issue title <input id="workflow-test-title" required maxlength="200"></label>
                   <label>Demo issue description <textarea id="workflow-test-body" required rows="3"></textarea></label>
-                  <div class="form-actions"><button id="test-workflow" type="submit" {% if not execution_enabled %}disabled{% endif %}>Test workflow</button></div>
+                  <div class="form-actions"><button id="test-workflow" type="submit" {% if not execution_enabled %}disabled{% endif %}>Test workflow</button><button id="stop-workflow-test" type="button" class="stop-button" hidden>Stop test</button></div>
                   <p id="workflow-test-availability" class="muted" role="status" hidden></p>
                 </form>
                 <p id="workflow-test-error" class="notice" role="alert" hidden></p>
@@ -134,7 +134,7 @@
           </form>
         </div>
         <div id="run-detail" hidden>
-          <div class="toolbar"><h2 id="run-heading"></h2><span id="run-state" class="run-state"></span></div>
+          <div class="toolbar"><h2 id="run-heading"></h2><span id="run-state" class="run-state"></span><button id="stop-workflow-run" type="button" class="stop-button" hidden>Stop run</button></div>
           <div class="run-context"><button id="run-issue-link" type="button" class="text-link"></button><time id="run-created" class="muted"></time></div>
           <p id="run-status" class="muted" role="status"></p>
           <div id="run-outcome" hidden><h3>Summary</h3><p id="run-summary" class="run-summary"></p></div>

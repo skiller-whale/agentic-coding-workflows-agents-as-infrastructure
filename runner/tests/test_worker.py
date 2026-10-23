@@ -512,6 +512,57 @@ def test_sigterm_stops_agent_group_and_finishes_failed_run(exercise, monkeypatch
     assert_child_stopped(int(exercise.child_pid.read_text()))
 
 
+def test_stop_waiting_run_never_invokes_claude(exercise):
+    directory = exercise.publish()
+    response = exercise.client.post('/api/runs/' + directory.name + '/stop')
+    assert response.status_code == 202 and response.json['status'] == 'stopped'
+    worker.Worker(exercise.config).run(once=True)
+    assert worker.read_json(directory / 'status.json')['status'] == 'stopped'
+    assert not exercise.calls.exists()
+    assert not (exercise.config.worktrees / directory.name).exists()
+
+
+@pytest.mark.parametrize('test', [False, True])
+def test_stop_active_run_or_test_kills_children_and_retains_artifacts(exercise, monkeypatch, test):
+    monkeypatch.setenv('FAKE_MODE', 'shutdown')
+    if test:
+        source = ('---\nname: Unsaved demo\nmodel: configured-test-model\ntrigger: manual\n'
+                  'tools: []\n---\n\nInspect the demo issue.\n')
+        response = exercise.client.post('/api/workflow-tests', json={
+            'workflow_path': '.whalehub/workflow.md', 'source': source,
+            'issue': {'title': 'Demo', 'body': 'Demo body'}})
+        assert response.status_code == 202, response.json
+        identifier = response.json['run_id']
+    else:
+        identifier = exercise.publish('patch').name
+    directory = exercise.config.runs / identifier
+    errors = []
+    def execute():
+        try:
+            worker.Worker(exercise.config).run(once=True)
+        except Exception as error:
+            errors.append(error)
+    thread = Thread(target=execute, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not exercise.child_pid.exists() and thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert exercise.child_pid.exists(), errors
+    endpoint = ('/api/workflow-tests/' if test else '/api/runs/') + identifier
+    response = exercise.client.post(endpoint + '/stop')
+    assert response.status_code == 202, response.json
+    thread.join(timeout=10)
+    assert not thread.is_alive() and not errors
+    status = worker.read_json(directory / 'status.json')
+    assert status['status'] == 'stopped' and status['finished_at']
+    assert 'Stopped by user.' in status['message']
+    assert (directory / 'changes.patch').exists()
+    assert (directory / 'result.json').exists()
+    assert_child_stopped(int(exercise.child_pid.read_text()))
+    if test:
+        assert exercise.client.get(endpoint).json['status'] == 'stopped'
+
+
 def test_no_issue_workflow_reads_creates_and_updates_issues_via_mcp(exercise, monkeypatch):
     directory = exercise.publish()
     job = worker.read_json(directory / 'job.json')

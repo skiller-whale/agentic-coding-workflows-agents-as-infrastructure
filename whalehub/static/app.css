@@ -42,6 +42,9 @@ p { margin: .5rem 0 .9rem; }
 .run-state[data-status="running"], .workflow-state[data-status="unsaved"] { color: #79500e; background: #fff2d6; }
 .run-state[data-status="succeeded"] { color: #27613b; background: #e4f2e8; }
 .run-state[data-status="failed"], .workflow-state[data-status="invalid"] { color: #8f261c; background: #fff0ee; }
+.run-state[data-status="stopped"] { color: #555b68; background: #edf0f3; }
+.stop-button { color: #8f261c; border-color: #c9a29f; background: #fff7f6; white-space: nowrap; }
+.stop-button:hover:enabled { background: #fff0ee; }
 .run-context { display: flex; flex-wrap: wrap; gap: .8rem; align-items: baseline; font-size: .9rem; margin-bottom: .5rem; }
 .run-context .text-link { background: transparent; border: 0; padding: 0; color: #315c8b; text-decoration: underline; }
 .run-summary { white-space: pre-wrap; overflow-wrap: anywhere; }

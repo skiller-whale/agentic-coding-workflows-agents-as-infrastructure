@@ -186,6 +186,9 @@ def create_app(config=None):
     issues_path.parent.mkdir(parents=True, exist_ok=True)
     test_issues = state / "test-issues"
     test_issues.mkdir(exist_ok=True)
+    test_sync = state / "test-sync"
+    tested_workflows = test_sync / "workflows"
+    tested_workflows.mkdir(parents=True, exist_ok=True)
 
     def append_activity(content):
         # Appending preserves the inode used by sync's read-only file mount.
@@ -355,6 +358,8 @@ def create_app(config=None):
                                                           "finished_at": datetime.now(timezone.utc).isoformat(timespec="microseconds")})
                     activity("workflow_test_stopped" if test else "workflow_run_stopped",
                              run_id=identifier, workflow_path=job["workflow"]["path"])
+                    if test:
+                        refresh_test_results()
                 return {"run_id": identifier, "status": read_json(path / "status.json")["status"]}, 202
 
     def validate_labels(labels):
@@ -384,6 +389,37 @@ def create_app(config=None):
 
     def issue_store(path, job):
         return test_issues / (path.name + ".json") if job.get("test") else issues_path
+
+    def sync_text(path, content):
+        if not path.exists() or path.read_text(encoding="utf-8") != content:
+            atomic_text(path, content)
+
+    def refresh_test_results():
+        tests = []
+        for directory in directories():
+            job = job_for(directory)
+            if job.get("test"):
+                tests.append((job["created_at"], directory.name, directory, job))
+        if not tests:
+            return
+
+        lines = ["# Workflow test results\n"]
+        for number, (created_at, _, directory, job) in enumerate(sorted(tests), start=1):
+            started = datetime.fromisoformat(created_at).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            status = read_json(directory / "status.json")["status"]
+            lines.append(f"\n## Test {number}: `{job['workflow']['path']}`\n")
+            lines.append(f"\nStarted: {started}  \nOutcome: {status}\n")
+            for issue in read_json(issue_store(directory, job)):
+                title = json.dumps(" ".join(issue["title"].split()), ensure_ascii=False)
+                labels = ", ".join(json.dumps(label, ensure_ascii=False) for label in issue["labels"]) or "none"
+                lines.append(f"\n### Issue: {title}\n\nLabels: {labels}\n")
+                if issue["comments"]:
+                    for comment in issue["comments"]:
+                        lines.append("\nComment:\n\n")
+                        lines.extend(f"> {line}\n" for line in comment["body"].splitlines())
+                else:
+                    lines.append("\nComments: none\n")
+        sync_text(test_sync / "results.md", "".join(lines))
 
     def require_idle():
         if any(read_json(path / "status.json")["status"] == "running" for path in directories()):
@@ -415,6 +451,9 @@ def create_app(config=None):
                  run_id=identifier, workflow_path=job["workflow"]["path"],
                  workflow_name=definition["name"], issue_id=issue["id"] if issue else None,
                  trigger="test" if test else trigger)
+        if test:
+            sync_text(tested_workflows / path.name, source)
+            refresh_test_results()
         return {"run_id": identifier, "status": "running"}
 
     def issue_workflows():
@@ -627,6 +666,7 @@ def create_app(config=None):
                 issue = {"id": max(i["id"] for i in issues) + 1, **fields, "labels": [], "comments": []}
                 issues.append(issue)
                 write_json(store, issues)
+                refresh_test_results()
                 activity("issue_created", actor="agent", issue_id=issue["id"], title=issue["title"],
                          run_id=identifier, test=True)
             else:
@@ -667,6 +707,8 @@ def create_app(config=None):
             issue = issue_for(issues, number)
             comment = append_comment(issue, fields["body"], job["workflow"]["name"], identifier)
             write_json(store, issues)
+            if job.get("test"):
+                refresh_test_results()
             activity("issue_comment_added", actor="agent", issue_id=number, comment_id=comment["id"],
                      run_id=identifier, test=bool(job.get("test")))
             return {"issue_number": issue["id"], "comment": comment}, 201
@@ -685,6 +727,8 @@ def create_app(config=None):
             issue = issue_for(issues, number)
             issue["labels"] = data["labels"]
             write_json(store, issues)
+            if job.get("test"):
+                refresh_test_results()
             activity("issue_labels_updated", actor="agent", issue_id=number, labels=issue["labels"],
                      run_id=identifier, test=bool(job.get("test")))
             return {"issue_number": issue["id"], "labels": issue["labels"]}
@@ -713,6 +757,7 @@ def create_app(config=None):
     @app.get("/api/workflow-tests")
     def list_workflow_tests():
         with locked():
+            refresh_test_results()
             values = [inspect_run(path) for path in directories() if job_for(path).get("test")]
             return {"tests": [{k: value[k] for k in ("run_id", "created_at", "workflow", "status", "message", "stop_requested")}
                               for value in sorted(values, key=lambda v: (v["created_at"], v["run_id"]), reverse=True)]}
@@ -724,6 +769,7 @@ def create_app(config=None):
             job = job_for(path)
             if not job.get("test"):
                 raise APIError("Workflow test not found.", 404)
+            refresh_test_results()
             return {**inspect_run(path), "source": job["workflow"]["source"],
                     "issues": [agent_issue(issue) for issue in read_json(issue_store(path, job))]}
 
@@ -765,14 +811,21 @@ def create_app(config=None):
             require_idle()
             return publish_run(path, source, definition, issue, base), 202
 
-    # Preserve the sync snapshot for runs created before run.json was introduced.
+    # Preserve snapshots for runs created before run.json was introduced.
     with locked():
+        previous_tests = []
         for path in directories():
             if not (path / "run.json").exists():
                 try:
                     write_json(path / "run.json", job_for(path))
                 except (OSError, ValueError):
                     app.logger.exception("Could not snapshot existing run %s", path.name)
+            job = job_for(path)
+            if job.get("test"):
+                previous_tests.append((job["created_at"], path.name, job))
+        for _, _, job in sorted(previous_tests):
+            sync_text(tested_workflows / Path(job["workflow"]["path"]).name, job["workflow"]["source"])
+        refresh_test_results()
         legacy_activity = state / "activity.jsonl"
         if legacy_activity.is_file():
             try:

@@ -917,6 +917,49 @@ def test_each_workflow_test_starts_with_fresh_issue_state(exercise):
     assert created.json['id'] == 3
 
 
+def test_test_sync_keeps_latest_draft_and_all_readable_results(exercise):
+    _, client, repo, config = exercise
+    sync = config['STATE_PATH'] / 'test-sync'
+    draft = sync / 'workflows/triage.md'
+    results = sync / 'results.md'
+    saved = (repo / '.whalehub/triage.md').read_text()
+
+    first_source = TEST_WORKFLOW + '\nFirst draft.\n'
+    first = publish_test(exercise, first_source)
+    assert draft.read_text() == first_source
+    assert set_labels(client, first, ['maintenance', 'agent-ready']).status_code == 200
+    assert client.post('/api/runs/' + first.name + '/comments',
+                       json={'issue_number': 1, 'body': 'Needs a small fix.\nTests should pass.'}).status_code == 201
+    finish(first)
+    assert client.get('/api/workflow-tests/' + first.name).json['status'] == 'succeeded'
+
+    second_source = TEST_WORKFLOW + '\nSecond draft.\n'
+    second = publish_test(exercise, second_source)
+    assert draft.read_text() == second_source
+    assert [path.name for path in (sync / 'workflows').iterdir()] == ['triage.md']
+    assert (repo / '.whalehub/triage.md').read_text() == saved
+    finish(second, status='failed')
+    assert client.get('/api/workflow-tests/' + second.name).json['status'] == 'failed'
+
+    report = results.read_text()
+    assert report.count('## Test ') == 2
+    assert 'Outcome: succeeded' in report and 'Outcome: failed' in report
+    assert 'Labels: "maintenance", "agent-ready"' in report
+    assert '> Needs a small fix.\n> Tests should pass.' in report
+    assert 'Comments: none' in report
+    assert first.name not in report and second.name not in report
+    assert 'run_id' not in report and 'comment_id' not in report
+
+    inode = results.stat().st_ino
+    assert client.get('/api/workflow-tests').status_code == 200
+    assert results.stat().st_ino == inode
+    draft.unlink()
+    results.unlink()
+    module.create_app(config)
+    assert draft.read_text() == second_source
+    assert results.read_text() == report
+
+
 @pytest.mark.parametrize('change, status', [
     ({'source': 'Invalid workflow'}, 400),
     ({'issue': {'title': '', 'body': 'Body'}}, 400),

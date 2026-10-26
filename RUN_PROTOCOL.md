@@ -13,8 +13,8 @@ run directory. IDs are 32 lowercase hexadecimal characters. The worker holds an
 exclusive `worker.lock` and claims jobs by renaming `job.json` to `claimed.json`.
 The snapshot is immutable throughout execution. JSON writes use temporary files
 and atomic replacement; Flask serializes updates with a private `app.lock`.
-`run.json` retains a copy of the job snapshot for learner sync, independently of
-the worker's queue files. Startup fills in missing snapshots for existing runs.
+`run.json` retains a copy of the job snapshot independently of the worker's queue
+files. Startup fills in missing snapshots for existing runs.
 
 On worker restart, unfinished claimed jobs become failed (or stopped when a stop
 was requested) without replaying Claude or tools. Logs, metadata and artifacts
@@ -216,9 +216,13 @@ Run `./setup.sh` before starting or recreating Compose services. It creates the
 runtime directories without clearing existing progress.
 
 Sync has read-only mounts for saved `ticket_parser/.whalehub/*.md` workflows,
-`whalehub/data/issues.json`, run snapshots/statuses/results/patches, test issues
-and app activity. Worktrees and app source are not mounted. Queue files
-(`job.json`, `claimed.json`, `stop.json`, `control.lock`), MCP configuration and raw Claude output are excluded.
+`whalehub/data/issues.json`, app activity, and `test-sync`. Worktrees, app source,
+run directories and private test-issue snapshots are not mounted. `test-sync`
+contains one `workflows/<filename>.md` file with the latest tested source for
+each workflow. Its single `results.md` file lists all tests with their outcome,
+issue titles, labels and comment bodies. It omits run IDs and internal metadata.
+Flask updates this file when test issues change and when the UI reads a completed
+test. Startup rebuilds both test sync artifacts from existing tests.
 Host Claude session sync remains a separate mount.
 
 `FORCE_POLL=1` keeps sync on its polling path. In learnersync 0.2.8, live file
@@ -232,9 +236,8 @@ in UTC, followed by a short description. Entries record page opens, deliberate U
 clicks (label, tab and target), workflow saves/creation, queued runs/tests,
 issue changes and failed mutation requests. Server events include relevant
 workflow, issue and run IDs; agent changes are attributed separately and marked
-when scoped to a test. Polling and editor keystrokes are not recorded. Run
-`status.json` files supply the current execution state; the activity log records
-submission, not every worker status transition.
+when scoped to a test. Polling and editor keystrokes are not recorded. The
+activity log records submission, not every worker status transition.
 Startup converts existing JSONL activity once and archives the original file.
 The empty log is included in Git and is present before Compose starts. Learnersync
 uploads it after its first write; empty files are not uploaded. Changing filters does not remove

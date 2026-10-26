@@ -18,7 +18,8 @@ else
 fi
 
 mkdir -p "$app_dir/.whalehub/runs" \
-    "$app_dir/.whalehub/worktrees" "$app_dir/.whalehub/state/test-issues"
+    "$app_dir/.whalehub/worktrees" "$app_dir/.whalehub/state/test-issues" \
+    "$app_dir/.whalehub/state/test-sync/workflows"
 
 # An empty placeholder lets the foundation start without real credentials.
 # Runner integration will require an attendance ID before calling Claude.
